@@ -24,8 +24,11 @@ every domain relaxes on the same timescale. It doesn't:
   wrong, it can get the direction wrong.
 
 There is no portable "right" window across domains. `regime_detector.core.calibrate`
-finds each domain's own predictive-optimal window empirically, and
-checks the result before trusting it, instead of assuming one.
+finds each domain's own natural window empirically -- the one where the
+current regime bucket lines up most strongly with a different scale of
+change right afterward -- and checks the result before trusting it,
+instead of assuming one. This is a retrospective association check used
+to pick and validate a window, not a forecast of any future value.
 
 ## Install
 
@@ -44,12 +47,14 @@ examples/
 └── run_tunnel_test.py    # example run against network RTT/jitter-style telemetry
 ```
 
-- **`null_control.py`** — computes `bucket_spread`: does the causal
-  rolling std of |change| at window W actually predict the NEXT
-  |change|? Then `null_check` shuffles the series, re-differences, and
-  recomputes the same statistic many times, giving a z-score for "is
-  this distinguishable from noise" without needing a hand-picked
-  reference domain to compare against.
+- **`null_control.py`** — computes `bucket_spread`: does the current
+  regime bucket (from the causal rolling std of |change| at window W)
+  line up with a different scale of change right afterward? A
+  retrospective association check, not a forecast. Then `null_check`
+  shuffles the series, re-differences, and recomputes the same
+  statistic many times, giving a z-score for "is this distinguishable
+  from noise" without needing a hand-picked reference domain to compare
+  against.
 - **`validators.py`** — two gates on top of the raw sweep:
   1. **Boundary-artifact / undefined-below check** (`find_native_window`)
      — is the peak sitting at the smallest window actually tested and

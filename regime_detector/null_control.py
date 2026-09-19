@@ -1,10 +1,14 @@
 """Shuffle-null verification logic.
 
 The core statistic throughout this package is `bucket_spread`: does the
-causal rolling std of |change| at window W, lagged by one step, predict
-the NEXT |change|? Split into terciles (low/mid/high recent volatility)
-and compare the mean next-|change| in the high bucket against the low
-bucket -- that gap is the "spread."
+current regime bucket (low/mid/high, from the causal rolling std of
+|change| at window W, lagged by one step so nothing here looks ahead)
+line up with a different SCALE of change in the very next step? Split
+into terciles and compare the mean next-|change| in the high bucket
+against the low bucket -- that gap is the "spread." This is a
+retrospective association check used only to pick and validate a
+window, not a forecast of any specific future value -- see core.py's
+docstring on the witness/predictor distinction.
 
 A raw spread number means nothing on its own: some of it is always
 structure you'd see even in noise, purely from how many samples land in
@@ -52,9 +56,10 @@ def _causal_rolling_std(change, window):
 
 def bucket_spread(x, window):
     """Returns mean(next |change| | high bucket) - mean(next |change| |
-    low bucket) for the given window. NaN if a bucket has zero variance
-    (e.g. heavy ties collapsing the split at small W on sparse/discrete
-    data) -- callers must check for NaN, see validators.py."""
+    low bucket) for the given window -- a retrospective association
+    strength, not a forecast. NaN if a bucket has zero variance (e.g.
+    heavy ties collapsing the split at small W on sparse/discrete data)
+    -- callers must check for NaN, see validators.py."""
     change = np.abs(np.diff(x))
     sigma = _causal_rolling_std(change, window)
     sigma_lagged = np.empty(len(sigma))

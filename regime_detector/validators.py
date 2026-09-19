@@ -31,7 +31,8 @@ from .null_control import DEFAULT_WINDOWS, sweep
 
 def find_native_window(x, windows=DEFAULT_WINDOWS):
     """Sweeps candidate windows and returns the one maximizing
-    |predictive spread|, flagged for known failure shapes.
+    |regime-split spread| (see null_control.bucket_spread), flagged for
+    known failure shapes.
 
     Returns (W, spread, is_boundary_artifact, undefined_below):
     - is_boundary_artifact: the peak IS the smallest window actually
