@@ -23,62 +23,77 @@ every domain relaxes on the same timescale. It doesn't:
   relationship — the moving-average band doesn't just get the scale
   wrong, it can get the direction wrong.
 
-There is no portable "right" window across domains. `window_calibration.py`
+There is no portable "right" window across domains. `regime_detector.core.calibrate`
 finds each domain's own predictive-optimal window empirically, and
 checks the result before trusting it, instead of assuming one.
 
-## What's actually in here
-
-Two small modules, one demo:
-
-- **`window_calibration.py`** — sweeps candidate windows, picks the one
-  that maximizes predictive spread (does knowing "high/mid/low recent
-  volatility" actually predict the next |change|?), then runs it through
-  three gates before calling it real:
-  1. **Boundary-artifact check** — is the peak sitting at the smallest
-     window you tried, decaying monotonically from there? That means
-     you never bracketed the true optimum, not that none exists.
-  2. **Self-generated null check** — shuffle the series, re-difference,
-     recompute the same statistic, many times. Gives a z-score for "is
-     this distinguishable from noise" without needing a hand-picked
-     reference domain to compare against.
-  3. **Degenerate-dwell check** — even a window that clears the null
-     check can produce a regime label that flickers every single
-     sample. A median dwell of ≤1 is not a phase, so it's flagged
-     rather than trusted.
-- **`regime_detector.py`** — the actual online classifier. Strictly
-  causal: the regime at time *t* is decided using only samples up to
-  and including *t*, with tercile boundaries computed from an
-  *expanding* window (everything seen so far), never the whole series.
-  Nothing here peeks ahead.
-- **`example.py`** — synthetic demo, no external data needed. Shows the
-  calibrator correctly finding real regime structure in a volatility-
-  clustering series, and correctly rejecting a pure random walk as
-  noise.
+## Install
 
 ```bash
-python3 example.py
+pip install -e .
+```
+
+## What's actually in here
+
+```
+regime_detector/
+├── core.py             # main phase-window + regime-switching engine (calibrate, detect_regimes, dwell_stats)
+├── null_control.py      # shuffle-null verification logic (bucket_spread, null_check)
+└── validators.py         # sanity gates (boundary-artifact, undefined-window, degenerate-dwell checks)
+examples/
+└── run_tunnel_test.py    # example run against network RTT/jitter-style telemetry
+```
+
+- **`null_control.py`** — computes `bucket_spread`: does the causal
+  rolling std of |change| at window W actually predict the NEXT
+  |change|? Then `null_check` shuffles the series, re-differences, and
+  recomputes the same statistic many times, giving a z-score for "is
+  this distinguishable from noise" without needing a hand-picked
+  reference domain to compare against.
+- **`validators.py`** — two gates on top of the raw sweep:
+  1. **Boundary-artifact / undefined-below check** (`find_native_window`)
+     — is the peak sitting at the smallest window actually tested and
+     decaying monotonically from there (real signal, true optimum may be
+     smaller than anything tried), or is it only "first" because smaller
+     windows were undefined/NaN (heavy ties collapsing the split, never
+     really compared at all)? Conflating these produced a real false
+     positive during development; they're reported separately.
+  2. **Degenerate-dwell check** (`is_degenerate_dwell`) — even a window
+     that clears the null-check gate can produce a regime label that
+     flickers every single sample. A median dwell of ≤1 is not a phase,
+     so it's flagged rather than trusted.
+- **`core.py`** — `detect_regimes` is the actual online classifier,
+  strictly causal: the regime at time *t* is decided using only samples
+  up to and including *t*, with tercile boundaries computed from an
+  *expanding* window (everything seen so far), never the whole series.
+  `calibrate` orchestrates all of the above into one call.
+- **`examples/run_tunnel_test.py`** — synthetic RTT/jitter trace with a
+  real regime shift (quiet baseline → noisy contention → quiet again),
+  no external capture file required. Swap the synthetic generator for a
+  real column of RTT samples to run against your own data.
+
+```bash
+python3 examples/run_tunnel_test.py
 ```
 
 ```
-=== calibrating: synthetic volatility clustering (phi=0.9) (n=6000) ===
-  native window W=5  spread=0.571  null-z=13.74
-  synthetic volatility clustering (phi=0.9) regimes: 1163 regime runs over 5994 classified samples (mean run length = 5.2 samples)
-   low:   346 runs, mean dwell=5.6, median=3, max=51
-   mid:   512 runs, mean dwell=3.7, median=3, max=23
-  high:   305 runs, mean dwell=7.1, median=5, max=58
-
-=== calibrating: pure random walk (no regime structure) (n=6000) ===
-  native window W=300  spread=-0.066  null-z=-2.65
-  |z|=2.65 < 3.0 -- not distinguishable from noise, stopping here
+=== calibrating: tunnel RTT/jitter (n=6000) ===
+  native window W=8  spread=1.458  null-z=29.14
+  tunnel RTT/jitter regimes: 664 regime runs over 5991 classified samples (mean run length = 9.0 samples)
+   low:   212 runs, mean dwell=8.5, median=5, max=54
+   mid:   313 runs, mean dwell=5.2, median=3, max=31
+  high:   139 runs, mean dwell=18.4, median=8, max=818
 ```
+
+Note the `high` bucket's dwell: mean=18.4 but max=818 -- that's the
+detector correctly camping in "high" for the entire noisy middle
+segment, exactly the regime shift the synthetic trace was built with.
 
 ## Usage on your own data
 
 ```python
 import numpy as np
-from window_calibration import calibrate
-from regime_detector import detect_regimes, dwell_stats
+from regime_detector import calibrate, detect_regimes, dwell_stats
 
 x = np.asarray(your_series)
 result = calibrate(x, label="my series")

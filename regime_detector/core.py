@@ -1,21 +1,21 @@
-#!/usr/bin/env python3
-"""Causal, unsupervised regime detector.
+"""Main phase-window and regime-switching engine.
 
-Classifies each point in a time series into low/mid/high volatility
-"phase" using only the causal rolling standard deviation of |change| at
-a chosen window W, with tercile boundaries computed from an EXPANDING
-window (samples seen so far only). No target, no label, no lookahead:
-at time t the classifier only ever sees change[0..t] and quantiles of
-sigma[0..t].
+`detect_regimes` is the actual online classifier: strictly causal, no
+lookahead, no target/label. `calibrate` is the orchestrator most callers
+want -- it runs window discovery (validators.find_native_window), the
+shuffle-null gate (null_control.null_check), and the degenerate-dwell
+gate (validators), and only then calls detect_regimes.
 
 This is a witness, not a predictor: it answers "given everything up to
 and including now, which regime is the present moment in," not "what
-happens next." See README.md for why that distinction matters and for
-how to pick W with window_calibration.py.
+happens next" or "when will it change." See README.md.
 """
 from collections import deque
 
 import numpy as np
+
+from .null_control import null_check
+from .validators import dwell_medians, find_native_window, is_degenerate_dwell
 
 LABELS = ["low", "mid", "high"]
 
@@ -85,9 +85,7 @@ def detect_regimes(x, window, warmup=None, recompute_every=None):
 def dwell_stats(regimes, label="", verbose=True):
     """Collapses a regime-label sequence into runs and reports how long
     each regime persists. Real regime structure should show multi-sample
-    dwell times, not point-to-point flicker (median dwell <= 1 means the
-    "regime" found isn't real structure -- see README's degenerate-dwell
-    gate)."""
+    dwell times, not point-to-point flicker (see validators.is_degenerate_dwell)."""
     valid = [r for r in regimes if r is not None]
     if not valid:
         return []
@@ -112,3 +110,57 @@ def dwell_stats(regimes, label="", verbose=True):
                 print(f"  {LABELS[reg]:>4}: {len(lens):>5} runs, mean dwell={np.mean(lens):.1f}, "
                       f"median={np.median(lens):.0f}, max={max(lens)}")
     return runs
+
+
+def calibrate(x, label="", z_thresh=3.0, windows=None, verbose=True):
+    """Runs window discovery + null gate + degenerate-dwell gate and
+    returns a dict describing whether x has real, structured regimes
+    and at what window. This is the entry point most callers want."""
+    from .null_control import DEFAULT_WINDOWS
+
+    windows = windows or DEFAULT_WINDOWS
+    if verbose:
+        print(f"=== calibrating: {label} (n={len(x)}) ===")
+    W, spread, is_boundary, undefined_below = find_native_window(x, windows)
+    if W is None:
+        if verbose:
+            print("  too short to sweep, aborting")
+        return {"label": label, "has_structure": False, "reason": "too_short"}
+
+    real_s, z = null_check(x, W)
+    flag = ""
+    if is_boundary:
+        flag = "  [BOUNDARY ARTIFACT -- no real interior peak found]"
+    elif undefined_below:
+        flag = f"  [UNDEFINED BELOW W={W} -- smaller windows were NaN, cannot rule out a smaller peak]"
+    if verbose:
+        print(f"  native window W={W}  spread={spread:.3f}  null-z={z:.2f}{flag}")
+
+    if np.isnan(z):
+        if verbose:
+            print("  z=nan -- null computation broke (likely heavy ties/zeros), cannot validate")
+        return {"label": label, "W": W, "spread": spread, "z": z,
+                "boundary_artifact": is_boundary, "undefined_below": undefined_below,
+                "has_structure": False, "reason": "nan_null"}
+
+    if abs(z) < z_thresh:
+        if verbose:
+            print(f"  |z|={abs(z):.2f} < {z_thresh} -- not distinguishable from noise, stopping here")
+        return {"label": label, "W": W, "spread": spread, "z": z,
+                "boundary_artifact": is_boundary, "undefined_below": undefined_below,
+                "has_structure": False, "reason": "no_structure"}
+
+    direction = "clustering" if spread > 0 else "anti-persistent"
+    r = detect_regimes(x, window=W, warmup=W, recompute_every=max(100, W * 5))
+    runs = dwell_stats(r, label=f"  {label} regimes", verbose=verbose)
+
+    medians = dwell_medians(runs)
+    degenerate = is_degenerate_dwell(medians)
+    if degenerate and verbose:
+        print(f"  DEGENERATE DWELL -- median dwell <=1 in every regime ({medians}) -- "
+              f"not real regime structure regardless of null-z. Do not trust W={W}.")
+
+    return {"label": label, "W": W, "spread": spread, "z": z,
+            "boundary_artifact": is_boundary, "undefined_below": undefined_below,
+            "has_structure": not degenerate, "degenerate_dwell": degenerate,
+            "direction": direction, "runs": runs, "dwell_medians": medians}

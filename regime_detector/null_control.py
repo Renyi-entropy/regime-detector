@@ -1,0 +1,110 @@
+"""Shuffle-null verification logic.
+
+The core statistic throughout this package is `bucket_spread`: does the
+causal rolling std of |change| at window W, lagged by one step, predict
+the NEXT |change|? Split into terciles (low/mid/high recent volatility)
+and compare the mean next-|change| in the high bucket against the low
+bucket -- that gap is the "spread."
+
+A raw spread number means nothing on its own: some of it is always
+structure you'd see even in noise, purely from how many samples land in
+each bucket and how heavy the tails are. `null_check` answers "is this
+spread bigger than chance" without requiring a hand-picked reference
+domain to compare against -- it builds the null FROM THE SAME SERIES, by
+shuffling it.
+
+Important: the null is shuffle-then-difference, not difference-then-
+shuffle. Shuffling the already-differenced series (or overlapping blocks
+of it) can leak structure back in and inflate every z-score -- this was
+a real bug found and fixed during development (shuffling must happen on
+the raw values, then re-differenced, so temporal structure is genuinely
+destroyed before the statistic is recomputed).
+"""
+from collections import deque
+
+import numpy as np
+
+DEFAULT_WINDOWS = [2, 3, 5, 8, 12, 18, 27, 40, 60, 90, 135, 200, 300, 450, 650]
+N_NULL = 20
+
+
+def _causal_rolling_std(change, window):
+    n = len(change)
+    stds = np.empty(n)
+    buf = deque()
+    s = 0.0
+    s2 = 0.0
+    for i in range(n):
+        v = change[i]
+        buf.append(v)
+        s += v
+        s2 += v * v
+        if len(buf) > window:
+            old = buf.popleft()
+            s -= old
+            s2 -= old * old
+        m = len(buf)
+        mean = s / m
+        var = max(s2 / m - mean * mean, 0.0)
+        stds[i] = var ** 0.5
+    return stds
+
+
+def bucket_spread(x, window):
+    """Returns mean(next |change| | high bucket) - mean(next |change| |
+    low bucket) for the given window. NaN if a bucket has zero variance
+    (e.g. heavy ties collapsing the split at small W on sparse/discrete
+    data) -- callers must check for NaN, see validators.py."""
+    change = np.abs(np.diff(x))
+    sigma = _causal_rolling_std(change, window)
+    sigma_lagged = np.empty(len(sigma))
+    sigma_lagged[0] = sigma[0]
+    sigma_lagged[1:] = sigma[:-1]
+    warm = window
+    sig = sigma_lagged[warm:]
+    nxt = change[warm:]
+    if sig.std() == 0 or nxt.std() == 0:
+        return 0.0
+    z_sig = (sig - sig.mean()) / sig.std()
+    z_nxt = (nxt - nxt.mean()) / nxt.std()
+    terciles = np.quantile(z_sig, [1 / 3, 2 / 3])
+    bucket = np.digitize(z_sig, terciles)
+    means = [z_nxt[bucket == b].mean() for b in range(3)]
+    return means[2] - means[0]
+
+
+def sweep(x, windows=DEFAULT_WINDOWS, max_w_frac=0.1):
+    """bucket_spread at each candidate window, skipping any window too
+    large a fraction of the series to trust."""
+    n = len(x)
+    results = []
+    for W in windows:
+        if W >= n * max_w_frac:
+            break
+        results.append((W, bucket_spread(x, W)))
+    return results
+
+
+def null_check(x, window, n_null=N_NULL, seed=42):
+    """Shuffle x, re-difference, recompute bucket_spread at the SAME
+    window, n_null times. Returns (real_spread, z) where z is the real
+    spread's distance from the null distribution in null-std units."""
+    rng = np.random.default_rng(seed)
+    real_s = bucket_spread(x, window)
+    null_s = np.array([bucket_spread(rng.permutation(x), window) for _ in range(n_null)])
+    if null_s.std() == 0:
+        return real_s, float("nan")
+    z = (real_s - null_s.mean()) / null_s.std()
+    return real_s, z
+
+
+def acf_fft(a, maxlag):
+    """Full autocorrelation via FFT -- diagnostic only, not required by
+    calibrate(), useful for inspecting a domain's raw decorrelation
+    length directly."""
+    a = a - a.mean()
+    n = len(a)
+    f = np.fft.fft(a, n=2 * n)
+    acf = np.fft.ifft(f * np.conjugate(f))[:n].real
+    acf /= acf[0]
+    return acf[: maxlag + 1]
