@@ -57,9 +57,23 @@ def _causal_rolling_std(change, window):
 def bucket_spread(x, window):
     """Returns mean(next |change| | high bucket) - mean(next |change| |
     low bucket) for the given window -- a retrospective association
-    strength, not a forecast. NaN if a bucket has zero variance (e.g.
-    heavy ties collapsing the split at small W on sparse/discrete data)
-    -- callers must check for NaN, see validators.py."""
+    strength, not a forecast.
+
+    There is exactly ONE way this function says "this result isn't
+    trustworthy": NaN. Every caller (find_native_window's NaN filter,
+    calibrate()'s nan_null check) only has to know that one signal.
+    Found live 2026-09-19: this used to return a bare 0.0 for the
+    zero-variance case below (e.g. a constant-slope series, where
+    |diff(x)| never changes and the tercile split is meaningless) --
+    a SECOND, silent way of meaning "undefined" that looked exactly
+    like a real, valid "no predictive spread" measurement and slipped
+    straight past every downstream gate, none of which were looking
+    for it. Same root cause as this package's own README example of
+    the single-source-of-invariant pattern: two different code paths
+    each deciding independently what counts as "not a valid result"
+    will eventually disagree. Fixed by making zero-variance return the
+    same NaN the tie-collapse case already does, one invariant, one
+    place it's defined."""
     change = np.abs(np.diff(x))
     sigma = _causal_rolling_std(change, window)
     sigma_lagged = np.empty(len(sigma))
@@ -69,7 +83,7 @@ def bucket_spread(x, window):
     sig = sigma_lagged[warm:]
     nxt = change[warm:]
     if sig.std() == 0 or nxt.std() == 0:
-        return 0.0
+        return float("nan")
     z_sig = (sig - sig.mean()) / sig.std()
     z_nxt = (nxt - nxt.mean()) / nxt.std()
     terciles = np.quantile(z_sig, [1 / 3, 2 / 3])
