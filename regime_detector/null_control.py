@@ -29,7 +29,17 @@ from collections import deque
 import numpy as np
 
 DEFAULT_WINDOWS = [2, 3, 5, 8, 12, 18, 27, 40, 60, 90, 135, 200, 300, 450, 650]
-N_NULL = 20
+N_NULL = 100  # measured 2026-09-20: at N_NULL=20, z's own sampling noise
+              # (std over reruns with different shuffle seeds) is wide
+              # enough to flip a borderline series' verdict against
+              # z_thresh=3.0 on 47% of seeds -- not a tail risk, a coin
+              # flip. N_NULL=100 drops that to 7% (z std 0.67 -> 0.23) at
+              # ~5x the cost (~0.8s vs ~0.16s for a 6000-sample series in
+              # one null_check call) -- calibrate() only calls this once
+              # per series, not in a hot loop, so the cost is worth
+              # paying. N_NULL=200 tightens further (flip-rate near 0)
+              # for anyone calibrating a series they expect to sit near
+              # the threshold and want a firmer answer.
 
 
 def _causal_rolling_std(change, window):
@@ -94,7 +104,13 @@ def bucket_spread(x, window):
 
 def sweep(x, windows=DEFAULT_WINDOWS, max_w_frac=0.1):
     """bucket_spread at each candidate window, skipping any window too
-    large a fraction of the series to trust."""
+    large a fraction of the series to trust. Does NOT filter NaN
+    results -- a (W, nan) tuple can and does appear in the returned
+    list. That's deliberate: filtering is the CALLER's job (see
+    validators.find_native_window's NaN filter and its
+    boundary-artifact-vs-undefined-below distinction), because only the
+    caller knows whether "some windows were undefined" changes how the
+    rest of the candidates should be interpreted."""
     n = len(x)
     results = []
     for W in windows:
@@ -107,7 +123,18 @@ def sweep(x, windows=DEFAULT_WINDOWS, max_w_frac=0.1):
 def null_check(x, window, n_null=N_NULL, seed=42):
     """Shuffle x, re-difference, recompute bucket_spread at the SAME
     window, n_null times. Returns (real_spread, z) where z is the real
-    spread's distance from the null distribution in null-std units."""
+    spread's distance from the null distribution in null-std units.
+
+    z can come back NaN for two DIFFERENT reasons that callers currently
+    can't tell apart from z alone (calibrate() reports both under one
+    "nan_null" reason): real_s itself is NaN (bucket_spread's own
+    zero-variance/tie-collapse case, propagates straight through the
+    arithmetic above), or real_s is a normal number but null_s.std()==0
+    (the null distribution degenerated -- every shuffled trial produced
+    the same spread, most often because window is close to len(x) and
+    there's almost no room left to shuffle into a different bucket
+    split). `np.isnan(real_s)` distinguishes the first case for a caller
+    that needs to know which."""
     rng = np.random.default_rng(seed)
     real_s = bucket_spread(x, window)
     null_s = np.array([bucket_spread(rng.permutation(x), window) for _ in range(n_null)])

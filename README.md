@@ -83,7 +83,7 @@ python3 examples/run_tunnel_test.py
 
 ```
 === calibrating: tunnel RTT/jitter (n=6000) ===
-  native window W=8  spread=1.458  null-z=29.14
+  native window W=8  spread=1.458  null-z=32.18
   tunnel RTT/jitter regimes: 625 regime runs over 5991 classified samples (mean run length = 9.6 samples)
    low:   199 runs, mean dwell=8.9, median=6, max=54
    mid:   296 runs, mean dwell=5.4, median=4, max=31
