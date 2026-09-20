@@ -36,11 +36,36 @@ def find_native_window(x, windows=DEFAULT_WINDOWS):
 
     Returns (W, spread, is_boundary_artifact, undefined_below):
     - is_boundary_artifact: the peak IS the smallest window actually
-      tested, and spread decays monotonically from there -- real
-      signal, but the true optimum may lie below anything tried.
-    - undefined_below: the peak is only first in the list because
-      smaller windows were NaN (untested, not tested-and-weaker).
+      tested, and |spread| decays monotonically from there (sign not
+      required -- a run of increasingly-negative spreads peaking at the
+      smallest window is exactly as much a boundary artifact as a
+      positive one; find_native_window itself already ranks candidates
+      by |spread| for the same reason). Real signal, but the true
+      optimum may lie below anything tried.
+    - undefined_below: narrower than the name suggests -- it's True only
+      when the peak is first in the NaN-filtered list AND every entry
+      strictly smaller than it (in the ORIGINAL windows) was NaN. A NaN
+      sitting between two valid, smaller windows (window B is NaN, but
+      window A < B is valid) is invisible to this flag: nothing here
+      claims "no undefined window exists below the peak," only "the
+      specific windows smaller than the peak, in order, were all
+      undefined." True for every case DEFAULT_WINDOWS's own sweep order
+      can produce (NaN only ever appears at small W from tie-collapse,
+      and ties get worse, not better, as W shrinks further -- so a valid
+      window below a NaN one doesn't occur with the shipped windows
+      list), but not a property this function verifies for an arbitrary
+      windows list.
+
+    `windows` MUST be sorted ascending -- `smallest_w_tested` is taken
+    as results[0][0], relying on sweep() preserving input order. An
+    unsorted list doesn't raise; it silently changes which window
+    boundary detection treats as "smallest," and can flip
+    is_boundary_artifact's verdict on an IDENTICAL peak depending only
+    on list order (confirmed: the same true peak read True with
+    windows=[2,3,5,8], False with windows=[8,5,3,2]). Sorted here
+    defensively rather than trusted from the caller.
     """
+    windows = sorted(windows)
     results = sweep(x, windows)
     valid = [(W, s) for W, s in results if not (isinstance(s, float) and np.isnan(s))]
     if not valid:
