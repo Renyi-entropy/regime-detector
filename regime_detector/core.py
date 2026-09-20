@@ -2,9 +2,16 @@
 
 `detect_regimes` is the actual online classifier: strictly causal, no
 lookahead, no target/label. `calibrate` is the orchestrator most callers
-want -- it runs window discovery (validators.find_native_window), the
-shuffle-null gate (null_control.null_check), and the degenerate-dwell
-gate (validators), and only then calls detect_regimes.
+want -- it runs window discovery (validators.find_native_window) and the
+shuffle-null gate (null_control.null_check), calls detect_regimes, then
+applies the degenerate-dwell gate to what came out.
+
+Note the ordering, which is not what it may look like: the null gate
+runs BEFORE detect_regimes and scores the window-discovery statistic,
+not the emitted labels. Only the dwell gate inspects the classifier's
+actual output, and it only rejects flicker. See calibrate()'s docstring
+for exactly what each gate does and does not establish -- neither one
+certifies that the three regimes are meaningful.
 
 This is a witness, not a predictor: it answers "given everything up to
 and including now, which regime is the present moment in," not "what
@@ -59,9 +66,15 @@ def detect_regimes(x, window, warmup=None, recompute_every=None):
 
     Returns a list of length len(x)-1 (one entry per diff), each either
     None (warmup) or 0/1/2.
+
+    `is None` rather than `or`, deliberately: an explicit warmup=0
+    ("classify from the first sample, I know what I'm doing") is falsy,
+    so `warmup or window` silently substituted `window` and emitted
+    `window` None labels the caller never asked for. Same trap for
+    recompute_every=0.
     """
-    warmup = warmup or window
-    recompute_every = recompute_every or max(200, window * 5)
+    warmup = window if warmup is None else warmup
+    recompute_every = max(200, window * 5) if recompute_every is None else recompute_every
     change = np.abs(np.diff(x))
     sigma = causal_rolling_std(change, window)
     n = len(sigma)
@@ -114,8 +127,33 @@ def dwell_stats(regimes, label="", verbose=True):
 
 def calibrate(x, label="", z_thresh=3.0, windows=None, verbose=True):
     """Runs window discovery + null gate + degenerate-dwell gate and
-    returns a dict describing whether x has real, structured regimes
-    and at what window. This is the entry point most callers want."""
+    returns a dict describing what survived, and at what window. This
+    is the entry point most callers want.
+
+    What the two gates DO and DON'T establish -- read this before
+    trusting `has_structure`:
+
+    - The null gate (`passed_null_gate`) tests the WINDOW-DISCOVERY
+      statistic, `bucket_spread` at W, against a shuffle null. Passing
+      means "there is a real, non-chance association at W between the
+      recent-volatility bucket and the next |change|." It does NOT
+      validate the regime labels themselves: bucket_spread splits on
+      GLOBAL terciles of the whole series, while detect_regimes splits
+      on causal EXPANDING terciles refreshed periodically. Related
+      quantities, not the same split, and only the former is what the
+      z-score was computed on.
+    - The dwell gate (`passed_dwell_gate`) is the only check that looks
+      at the actual classifier output, and it is a FLOOR, not evidence:
+      it rejects pure point-to-point flicker (median dwell <=1 in every
+      regime) and nothing more. Measured 2026-09-20: a pure random walk
+      clears it on 5/5 seeds with medians of 2-6. Clearing it means
+      "not flicker," never "structure is real."
+
+    `has_structure` is the conjunction of both, so a False can come
+    from either gate -- `reason` says which, on every False path.
+    Neither gate, alone or together, certifies that the three regimes
+    are meaningful; they establish that a window was found, that it
+    isn't chance, and that the labels don't flicker."""
     from .null_control import DEFAULT_WINDOWS
 
     windows = windows or DEFAULT_WINDOWS
@@ -125,7 +163,8 @@ def calibrate(x, label="", z_thresh=3.0, windows=None, verbose=True):
     if W is None:
         if verbose:
             print("  too short to sweep, aborting")
-        return {"label": label, "has_structure": False, "reason": "too_short"}
+        return {"label": label, "passed_null_gate": None, "passed_dwell_gate": None,
+                "has_structure": False, "reason": "too_short"}
 
     real_s, z = null_check(x, W)
     flag = ""
@@ -141,6 +180,7 @@ def calibrate(x, label="", z_thresh=3.0, windows=None, verbose=True):
             print("  z=nan -- null computation broke (likely heavy ties/zeros), cannot validate")
         return {"label": label, "W": W, "spread": spread, "z": z,
                 "boundary_artifact": is_boundary, "undefined_below": undefined_below,
+                "passed_null_gate": False, "passed_dwell_gate": None,
                 "has_structure": False, "reason": "nan_null"}
 
     if abs(z) < z_thresh:
@@ -148,10 +188,20 @@ def calibrate(x, label="", z_thresh=3.0, windows=None, verbose=True):
             print(f"  |z|={abs(z):.2f} < {z_thresh} -- not distinguishable from noise, stopping here")
         return {"label": label, "W": W, "spread": spread, "z": z,
                 "boundary_artifact": is_boundary, "undefined_below": undefined_below,
+                "passed_null_gate": False, "passed_dwell_gate": None,
                 "has_structure": False, "reason": "no_structure"}
 
     direction = "clustering" if spread > 0 else "anti-persistent"
-    r = detect_regimes(x, window=W, warmup=W, recompute_every=max(100, W * 5))
+    # No recompute_every override here, deliberately: this used to pass
+    # max(100, W*5) while detect_regimes' own default is max(200, W*5),
+    # so the labels calibrate() reported dwell stats on were NOT the
+    # labels a caller got from the README's own `detect_regimes(x,
+    # window=result["W"])` -- 61/5999 differed on the bundled example,
+    # and the README's printed output showed 664 runs from calibrate
+    # against 625 from the documented follow-up call. One schedule,
+    # defined in one place (detect_regimes), same as every other
+    # invariant in this package.
+    r = detect_regimes(x, window=W)
     runs = dwell_stats(r, label=f"  {label} regimes", verbose=verbose)
 
     medians = dwell_medians(runs)
@@ -162,5 +212,7 @@ def calibrate(x, label="", z_thresh=3.0, windows=None, verbose=True):
 
     return {"label": label, "W": W, "spread": spread, "z": z,
             "boundary_artifact": is_boundary, "undefined_below": undefined_below,
+            "passed_null_gate": True, "passed_dwell_gate": not degenerate,
             "has_structure": not degenerate, "degenerate_dwell": degenerate,
+            "reason": None if not degenerate else "degenerate_dwell",
             "direction": direction, "runs": runs, "dwell_medians": medians}

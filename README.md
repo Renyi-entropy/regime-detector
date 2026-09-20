@@ -84,13 +84,13 @@ python3 examples/run_tunnel_test.py
 ```
 === calibrating: tunnel RTT/jitter (n=6000) ===
   native window W=8  spread=1.458  null-z=29.14
-  tunnel RTT/jitter regimes: 664 regime runs over 5991 classified samples (mean run length = 9.0 samples)
-   low:   212 runs, mean dwell=8.5, median=5, max=54
-   mid:   313 runs, mean dwell=5.2, median=3, max=31
-  high:   139 runs, mean dwell=18.4, median=8, max=818
+  tunnel RTT/jitter regimes: 625 regime runs over 5991 classified samples (mean run length = 9.6 samples)
+   low:   199 runs, mean dwell=8.9, median=6, max=54
+   mid:   296 runs, mean dwell=5.4, median=4, max=31
+  high:   130 runs, mean dwell=20.2, median=8, max=818
 ```
 
-Note the `high` bucket's dwell: mean=18.4 but max=818 -- that's the
+Note the `high` bucket's dwell: mean=20.2 but max=818 -- that's the
 detector correctly camping in "high" for the entire noisy middle
 segment, exactly the regime shift the synthetic trace was built with.
 
@@ -107,6 +107,31 @@ if result["has_structure"]:
     regimes = detect_regimes(x, window=result["W"])
     dwell_stats(regimes, label="my series")
 ```
+
+## What the gates actually establish
+
+Worth being precise, because the names flatter them:
+
+- The **null gate** scores the *window-discovery* statistic
+  (`bucket_spread` at W) against a shuffle null. Passing means "there's
+  a real, non-chance association at W between the recent-volatility
+  bucket and the next |change|." It does **not** validate the emitted
+  regime labels — `bucket_spread` splits on global terciles of the whole
+  series, while `detect_regimes` splits on causal *expanding* terciles
+  refreshed periodically. Related quantities, different splits, and the
+  z-score was only ever computed on the first.
+- The **dwell gate** is the only check that looks at the classifier's
+  actual output, and it's a **floor, not evidence**: it rejects pure
+  point-to-point flicker (median dwell ≤1 in every regime) and nothing
+  else. Measured: a pure random walk clears it on 5/5 seeds with median
+  dwells of 2–6. Clearing it means "not flicker," never "structure is
+  real."
+
+So `has_structure: True` means a window was found, it isn't chance, and
+the labels don't flicker — three necessary conditions, not a proof that
+the three regimes are meaningful. `calibrate()` returns
+`passed_null_gate` and `passed_dwell_gate` separately so you can see
+which one carried the verdict, and `reason` on every False path.
 
 ## What this deliberately does NOT do
 
